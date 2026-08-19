@@ -43,7 +43,7 @@ SecStack 是一个以资产图谱为中枢的安全方法论编排平台——�
   - 5.5 为什么攻击链可视化用单链主线而非 BFS 全图层序展开
 - [6. 数据联动全景](#6-数据联动全景)
   - 6.1 场景一：SCA 漏洞发现 → 绑定资产 → 攻击链推演 → 修复优先级排序
-  - 6.2 场景二：安全基线检查 → 不合规标记写入资产 → 触发攻击面重算
+  - 6.2 场景二：安全能力发现 → 资产挂载 → 风险冒泡 → 攻击面联动
   - 6.3 场景三：攻击链高置信度推演 → 人工验证工单 → 实证后翻红 → 回写资产图谱
   - 6.4 场景四：AI 渗透反哺资产台账 → 影子资产转正 → 孤儿风险归因 → 热力图展示
 - [7. 快速开始](#7-快速开始)
@@ -275,7 +275,7 @@ stateDiagram-v2
 
 - **每条基线附正例反例和测试步骤，不仅写"要求"**：这是基线的教学属性——不是告诉开发者"你应该做 X"，而是展示"这样做是错的（❌反面示例），这样做是对的（✅正面示例），按这个步骤验证（detection 编号化断言）"。补偿措施字段（compensation）给出当技术约束导致无法完全合规时的替代方案（如 WAF 虚拟补丁兜底 ≤30 天）。这套设计让基线从"安全团队的检查清单"变成"开发团队的自检工具"。
 
-**闭环**：基线条目在平台内管理 → CI/CD 触发自动检查 → 不合规标记写入资产图谱节点 → 触发攻击面重算（该节点的 controls 因子降低）→ 修复后重新检查 → 合规状态回写资产图谱。
+**闭环**：基线条目在平台内管理 → CI/CD 触发自动检查 → 逐项 pass/fail/warn + 证据原文，不合规项写入 BaselineRunItem 并以 exit code 1 阻断合并 → 修复后重新检查 → 合规状态更新。
 
 ---
 
@@ -704,28 +704,25 @@ RiskScorer 加权融合五层分数（L1=0.15 / L2=0.30 / L3=0.25 / L4=0.20 / L5
 ```mermaid
 sequenceDiagram
     participant SCA as SCA 引擎
+    participant SCAN as 安全能力（基线/数据安全/主机/…）
     participant AG as 资产图谱/台账
     participant ATK as 攻击图引擎
-    participant BS as 安全基线
     participant PEN as AI 渗透
     participant HU as 人工验证
     participant VIS as 风险热力图
 
-    SCA->>AG: 写入组件依赖关系 + CVE
-    AG->>AG: 风险沿祖先链冒泡
-    AG->>ATK: 推送更新后的资产关系 + 漏洞
-    ATK->>ATK: 重建有向攻击图 · 路径发现
+    SCA->>AG: 写入组件依赖关系 + CVE（影子资产兜底挂 asset_id）
+    SCAN->>AG: 写入 FindingRecord（尽量关联 asset_id）
+    AG->>AG: update_risk_cache 聚合 · 风险沿祖先链冒泡
+    AG->>VIS: 推送资产风险分布（热力图）
+    AG->>ATK: 资产结构/关系变更 → invalidate_attack_paths
+    ATK->>ATK: 懒重算有向攻击图 · 路径发现
     ATK->>HU: 高置信度路径派发验证工单
-    
-    BS->>AG: 写入基线合规状态
-    AG->>AG: 不合规节点 controls 因子降低
-    AG->>ATK: 触发 invalidate_attack_paths
-    
-    PEN->>AG: 影子资产(新IP/域名, unconfirmed) + 资产补充(端口/CPE/漏洞)
+
+    PEN->>AG: 影子资产(unconfirmed) + 资产补充(端口/CPE/漏洞)
     PEN->>ATK: probability_updater 回写边概率
-    AG->>AG: 影子资产转正 · 孤儿 Finding 归因
-    AG->>VIS: 推送资产风险分布
-    
+    AG->>PEN: 回灌资产已知漏洞/端口（CVE 去重 · 跳过全端口扫描）
+
     HU->>ATK: confirm/reject_verify_task 确认翻红 / 驳回阻断
     ATK->>ATK: _SIM_CACHE.clear() · Yen's K 重排
     ATK->>AG: 回写边验证状态至资产节点
@@ -735,17 +732,17 @@ sequenceDiagram
 
 **触发条件**：Java 项目源码上传或 Maven 项目路径指定，触发 SCA 全链路扫描。
 
-**流转路径**：(1) MavenBomGenerator Docker 内执行 cyclonedx 生成 SBOM → MavenDepTreeParser 解析依赖树，过滤 Maven 调解淘汰的幽灵边，构建 introduced_by 传递路径 → OsvClient 批量查询 OSV.dev + 11 个离线 CVE JSON 数据库 → 返回 CVE 列表含严重程度和修复版本；(2) 结果写入 FindingRecord（关联 product_id 和 asset_id）→ 对应组件节点在资产图谱中自动关联漏洞 → AssetSecurityStateORM 更新该节点及其祖先节点的漏洞计数；(3) AttackGraph._load_nodes() 读取更新后的资产关系 + 漏洞数据 → 重新构建有向攻击图 → AttackPathFinder 从入口节点到核心资产计算攻击路径 → 缓存至 AttackPathsCacheORM；(4) 前端作战沙盘 G6 渲染更新后的攻击拓扑 → 包含新发现漏洞的路径自动提升优先级；(5) SCA 修复引擎读取资产图谱中该组件的影响面（被哪些服务依赖、这些服务属于哪些产品线）→ 杠杆排序（传播面×漏洞权重）→ 三圈选型推荐最小破坏性修复版本。
+**流转路径**：(1) MavenBomGenerator Docker 内执行 cyclonedx 生成 SBOM → MavenDepTreeParser 解析依赖树，过滤 Maven 调解淘汰的幽灵边，构建 introduced_by 传递路径 → OsvClient 批量查询 OSV.dev + 11 个离线 CVE JSON 数据库 → 返回 CVE 列表含严重程度和修复版本；(2) 结果写入 FindingRecord（关联 product_id 和 asset_id，SCA 无归属组件走影子资产兜底解析）→ 对应组件节点在资产图谱中自动关联漏洞 → update_risk_cache 聚合该节点风险并沿祖先链冒泡至 AssetNodeORM.risk_cache；(3) AttackGraph._load_nodes() 读取更新后的资产关系 + 漏洞数据 → 重新构建有向攻击图 → AttackPathFinder 从入口节点到核心资产计算攻击路径 → 缓存至 AttackPathsCacheORM；(4) 前端作战沙盘 G6 渲染更新后的攻击拓扑 → 包含新发现漏洞的路径自动提升优先级；(5) SCA 修复引擎读取资产图谱中该组件的影响面（被哪些服务依赖、这些服务属于哪些产品线）→ 杠杆排序（传播面×漏洞权重）→ 三圈选型推荐最小破坏性修复版本。
 
 **资产图谱的角色**：将 SCA 的"组件 CVE"转化为"产品线 Y 的服务 X 的依赖 Z 有漏洞，攻击者可能从公网入口经过 X 打到核心数据库"。SCA 告诉你要修什么，资产图谱告诉你要先修什么——因为影响面大的先修。
 
-### 6.2 场景二：安全基线检查 → 不合规标记写入资产 → 触发攻击面重算
+### 6.2 场景二：安全能力发现 → 资产挂载 → 风险冒泡 → 攻击面联动
 
-**触发条件**：GitLab CI MR 事件触发基线检查流水线。
+**触发条件**：任一安全能力产出新发现——SCA 组件 CVE、数据安全 PII/异常、安全基线不合规、主机扫描端口/弱点、渗透结果等。
 
-**流转路径**：(1) pre-commit 钩子先执行密钥检测（200+ 正则 + RF 降噪），命中 sys.exit(1) 阻止提交；(2) MR 合并触发 CI 基线检查 → 8 类检查脚本执行（数据库配置/服务器加固/镜像安全/容器安全/Nginx/K8s/Hadoop/数据保护）→ 逐项输出 pass/fail/warn + 证据原文；(3) 不合规项写入 BaselineRunItem → 关联的资产节点在 AssetAttackSurfaceORM 中更新 controls 因子（如"数据库未启用 TLS"将该节点的 gate_effectiveness 从 0.8 降到 0.3）；(4) 资产 attack_surface 数据变更触发 invalidate_attack_paths → 攻击图缓存失效；(5) 下次攻击路径计算时，BFS 概率推演中该节点的 pass_through gate_effectiveness 降低 → 经过该节点的攻击路径 p_success 上升 → 在 G6 拓扑中该路径边加粗/变色，引起安全团队注意。
+**流转路径**：(1) 各能力扫描结果统一写入 FindingRecord（FindingStore），并尽量关联资产——渗透/数据安全显式携带 asset_id，SCA 无归属时走影子资产兜底自动解析，仍无主的 finding 由 OrphanCorrelator 正则+LLM 归因回填；(2) 风险聚合与冒泡——update_risk_cache 按 asset_id 聚合该资产的漏洞严重度写入 AssetNodeORM.risk_cache，再由 _bubble_risk 沿祖先链累加到父资产/产品线；(3) 风险分布经 heatmap-products/heatmap-assets 以风险热力图只读展示；(4) 攻击面联动——资产结构/关系/端点/安全等级变更触发 invalidate_attack_paths 清空路径缓存，下次路径计算懒重算（前端提供"重新分析"手动入口，周期定时重算为演进方向）；(5) 反哺渗透——资产上已积累的漏洞信息在下次渗透会话回灌，已知端口跳过 nmap 全端口扫描、已覆盖 CVE 对技能匹配降权，聚焦未知弱点。
 
-**资产图谱的角色**：把"这条基线检查没通过"转化为"这条攻击路径的成功概率上升了 X%"。一条看似不相关的基线配置缺陷（如"Redis 未设密码"），在资产图谱中被自动关联到"攻击者从 Web 入口到核心数据库的路径上多了一个跳板节点"。
+**资产图谱的角色**：把分散在 SCA/基线/数据安全/主机扫描的发现统一沉淀为资产的客观风险属性——"这条基线没通过、那个组件有 CVE、这台主机有弱口令"在资产图谱上汇聚成风险分数，沿祖先链冒泡到业务线，同时作为后续攻击推演与渗透的输入。
 
 ### 6.3 场景三：攻击链高置信度推演 → 人工验证工单 → 实证后翻红 → 回写资产图谱
 
