@@ -323,6 +323,10 @@ stateDiagram-v2
 
 > **pre-commit 密钥准入**：提交前本地密钥阻断——命中即 exit code 1 阻止提交，把密钥泄露拦截在代码入库之前。
 
+![pre-commit密钥拦截实录](images/pre-commit拦截.png)
+
+> **pre-commit 密钥拦截实录**：真实提交场景下密钥命中——pre-commit 钩子输出违规证据并以 exit code 1 阻断提交，密钥泄露被拦截在代码入库之前。
+
 ---
 
 ### 2.7 数据安全治理
