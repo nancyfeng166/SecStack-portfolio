@@ -405,6 +405,10 @@ RiskScorer 加权融合五层分数（L1=0.15 / L2=0.30 / L3=0.25 / L4=0.20 / L5
 
 **闭环**：用户输入 → 五层管线 → 放行/告警/阻断/人工审核 → 放行的输入进入 LLM → LLM 输出 → 输出护栏（PII 重扫 + 越狱检测 + sanitize）→ 返回给用户 → 全量调用统计写入 deque 200 条缓存。
 
+![AI 安全防御实际调用链](images/AI透明调用链.png)
+
+> **AI 安全防御实际项目图**：五层 Prompt 注入检测管线与输入输出护栏在平台中的真实调用链截图——每次 LLM 调用的完整安全流转。
+
 ![AI 安全防御五层管线](images/AI安全防御五层管线.png)
 
 > **AI 安全防御五层管线**：L0 预处理（NFKC + Base64）→ L1 57 条正则（~1ms）→ L2 deberta-v3 ML 分类器（~50ms）→ L3 DeepSeek LLM-as-Judge（~500ms，成本感知降级）→ L4 10 轮滑动窗口渐进攻击识别（~100ms）→ L5 PII 脱敏（~5ms）——RiskScorer 加权融合五层分数，按阈值放行/告警/阻断/人工审核。
@@ -429,9 +433,11 @@ RiskScorer 加权融合五层分数（L1=0.15 / L2=0.30 / L3=0.25 / L4=0.20 / L5
 
 **闭环**：Agent 发起工具调用 → 六步守卫逐项检查 → 通过后执行 → 执行结果 + 审计上下文写入 AuditTrail → HashChainArchive 每 1000 条封存 → Merkle 根锚定。
 
-![AI透明调用链](images/AI透明调用链.png)
+![Agent工具调用沙箱](images/Agent工具调用沙箱.png)
 
-> **AI 透明调用链**：Agent 工具调用六步守卫流水线可视化——权限矩阵 → 频率限额 → dry-run 预演 → 破坏性确认 → 回滚快照 → 执行审计，全链路可追溯。
+> **Agent 工具调用沙箱**：调用发起（MCP / AI Brain / 合规 Agent 三类入口，注入身份上下文）→ 6 步授权门禁（权限矩阵 → 频率限额 → dry-run 预演 → 破坏性确认 → 回滚快照 → 执行审计）→ 执行隔离（Docker / 本地沙箱 / 输出脱敏）→ 审计/回滚/告警，全链路可追溯。
+
+> **覆盖范围说明**：沙箱覆盖的是 MCP / AI Brain / 合规 Agent 三条「安全能力编排」路径；AI 渗透走的是自带加固的直连 runner，属于「计划中但未落地」的沙箱接线缺口（见 10.2 规划中）。
 
 ---
 
@@ -949,6 +955,9 @@ SecStack/
 - [ ] SCA 扩展 Gradle/Go modules/Poetry 生态的 BOM 生成：当前 cyclonedx 方案仅覆盖 Maven，其他生态需要各自的 SBOM 生成工具链
 - [ ] LangGraph 渗透图多目标并行：单目标内多工具已通过 `fan_out_actions`（Send API）并发扇出（asyncio 信号量，演示环境并发度 4）；多目标并行（多主机同时渗透，每个目标独立图实例）为更远扩展
 - [ ] WASM sandbox 作为 Docker 轻量替代：当前工具执行必须启动 Docker 容器（冷启动 ~3s），对于高频短任务（如单次 curl 探测）过于笨重。WASM sandbox 可降到 <100ms
+- [ ] AI 渗透工具执行接入沙箱：当前 LangGraph 渗透经 backend/graph/nodes.py → _run_tool_step 直连 runner（_PENTEST_TOOLS 工具白名单、禁止 localhost 扫描、端口范围限制、CLI 参数白名单、输出脱敏），未经过 agent_security 六步守卫；modules/penetration/sandbox.py 的 ToolSandbox（LocalSandbox/DockerSandbox）已实现但未接线到 /api/penetration/sandbox/run（capability_registry 标记 PLANNED），规划将 AI 渗透工具执行统一收敛到沙箱门禁
+- [ ] 合规审计前端（审计中心页面）：新增 audit-routes（/audit/events、/audit/chain、/audit/chain/verify + 事件→封块同步）+ 前端 audit-log.js 三 tab（审计事件表/哈希链完整性/安全事件），复用 AuditTrail.query/export 与 HashChainArchive.verify_chain/get_stats。现状：哈希链休眠未接线（add_event 生产代码无人调用），审计日志/哈希链零前端视图，详见 docs/20260725_第一阶段总结/合规审计补前端方案与2.12-2.13模块核查.md
+- [ ] README 2.12/2.13 措辞修正：「自动派发」实为边 hover 手动派单、「Yen's K 自动重排」实为清模拟缓存（路径表 24h 过期才重排）；「操作人脱敏」「PIPL/GDPR/等保法规映射」未实现（引擎仅映射 iso_42001/gb_42888/wgxb/owasp）
 - [ ] 数据安全补充差分隐私模块：当前仅有脱敏和加密，缺少 DP 预算管理和噪声注入，无法满足统计查询场景的隐私保护需求
 - [ ] LLM 调用 token 级审计：从请求级统计下沉到 token 级，支持敏感 token 回溯和成本归因到具体安全域
 - [ ] 训练安全扩展模型权重级后门检测（当前仅 pickle 字节码级），接入 Neural Cleanse / ABS 等激活聚类方法
